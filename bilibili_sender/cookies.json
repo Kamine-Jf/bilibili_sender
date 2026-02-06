@@ -1,0 +1,6 @@
+{
+    "SESSDATA": "你的SESSDATA值",
+    "bili_jct": "你的bili_jct值(CSRF Token)",
+    "DedeUserID": "你的用户ID",
+    "buvid3": "可选的其他cookie..."
+}
