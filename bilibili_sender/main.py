@@ -32,16 +32,19 @@ class SenderConfig:
     run_duration: int = 0  # 0 为无限，单位秒
 
 class BilibiliDanmakuSender:
-    def __init__(self, config: SenderConfig):
+    def __init__(self, config: SenderConfig, shared_cookies: Optional[Dict[str, str]] = None):
         self.config = config
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://www.bilibili.com/',
             'Origin': 'https://www.bilibili.com'
         }
-        self.cookies: Dict[str, str] = {}
-        self.csrf_token: Optional[str] = None
-        self.uid: Optional[str] = None
+        self.cookies: Dict[str, str] = shared_cookies or {}
+        # 如果传入了共享Cookie，则直接解析 CSRF
+        if shared_cookies:
+             self.csrf_token = self.cookies.get('bili_jct')
+             self.uid = self.cookies.get('DedeUserID')
+
         self.real_room_id: Optional[int] = None
         self.video_oid: Optional[int] = None
         
@@ -61,6 +64,10 @@ class BilibiliDanmakuSender:
         
     def load_cookies(self) -> bool:
         """从文件加载Cookies"""
+        # 如果已经加载（通过共享注入），则直接返回 True
+        if self.cookies and self.csrf_token:
+             return True
+
         try:
             if not os.path.exists(self.config.cookies_file):
                 logging.error(f"Cookies文件不存在: {self.config.cookies_file}")
@@ -202,31 +209,38 @@ class BilibiliDanmakuSender:
             logging.error(f"请求异常(可能非JSON响应): {e}")
             return False
 
-    async def run(self):
-        logging.info("🚀 脚本启动中...")
+    async def run(self, session: Optional[ClientSession] = None):
+        logging.info(f"[{self.config.target_id}] 🚀 给定目标 任务启动...")
         
         if not self.load_cookies():
-            logging.error("无法加载配置，程序退出")
+            logging.error(f"[{self.config.target_id}] 无法加载配置，任务退出")
             return
 
-        async with aiohttp.ClientSession() as session:
+        # 如果没有传入外部Session，则自己创建一个（用于兼容）
+        local_session = None
+        if session is None:
+            local_session = aiohttp.ClientSession()
+            active_session = local_session
+        else:
+            active_session = session
+
+        try:
             # 初始化目标
-            if not await self.get_target_info(session):
+            if not await self.get_target_info(active_session):
                 return
             
-            logging.info("✨ 开始循环发送弹幕...")
-            logging.info(f"设置参数: 间隔 {self.config.interval_min}-{self.config.interval_max}秒")
+            logging.info(f"[{self.config.target_id}] ✨ 开始循环发送弹幕...")
             
             msg_index = 0
             
             while True:
                 # 检查退出条件
                 if self.config.max_count > 0 and self.config.stats['success'] >= self.config.max_count:
-                    logging.info("已达到设定发送次数，停止运行")
+                    logging.info(f"[{self.config.target_id}] 已达到设定发送次数")
                     break
                 
                 if self.config.run_duration > 0 and (time.time() - self.config.stats['start_time']) > self.config.run_duration:
-                    logging.info("已达到设定运行时间，停止运行")
+                    logging.info(f"[{self.config.target_id}] 已达到设定运行时间")
                     break
 
                 # 准备发送
@@ -236,9 +250,9 @@ class BilibiliDanmakuSender:
                 # 发送动作
                 success = False
                 if self.config.mode == "live":
-                    success = await self.send_live_danmaku(session, current_msg)
+                    success = await self.send_live_danmaku(active_session, current_msg)
                 else:
-                    success = await self.send_video_danmaku(session, current_msg)
+                    success = await self.send_video_danmaku(active_session, current_msg)
                 
                 # 统计
                 self.stats['total'] += 1
@@ -249,7 +263,7 @@ class BilibiliDanmakuSender:
 
                 # 随机等待
                 delay = random.uniform(self.config.interval_min, self.config.interval_max)
-                # 微小的抖动，看起来更自然
+                # 微小的抖动
                 delay += random.uniform(-0.1, 0.1)
                 if delay < 0.2: delay = 0.2
                 
@@ -257,33 +271,69 @@ class BilibiliDanmakuSender:
 
             # 最终报告
             logging.info("-" * 30)
-            logging.info(f"运行结束。总尝试: {self.stats['total']}, 成功: {self.stats['success']}, 失败: {self.stats['fail']}")
+            logging.info(f"[{self.config.target_id}] 运行结束。总尝试: {self.stats['total']}, 成功: {self.stats['success']}, 失败: {self.stats['fail']}")
             logging.info("-" * 30)
+        finally:
+            if local_session:
+                await local_session.close()
 
-if __name__ == "__main__":
+async def main():
     # --- 用户配置区域 ---
-    TARGET = input("请输入直播间ID或视频BV号: ").strip()
+    raw_input = input("请输入直播间ID或视频BV号 (多个用空格或逗号分隔): ").strip()
     
+    # 支持逗号、分号、空格分隔
+    targets = [t.strip() for t in re.split(r'[,;，；\s]+', raw_input) if t.strip()]
+    
+    if not targets:
+        print("未输入有效目标")
+        return
+
     # 获取脚本所在目录，确保能找到同级目录下的cookies.json
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cookies_path = os.path.join(script_dir, "cookies.json")
 
-    # 你可以这里写死配置，或者接受输入
-    config = SenderConfig(
-        target_id=TARGET,
-        cookies_file=cookies_path,  # 使用绝对路径
-        interval_min=0.8,
-        interval_max=1.5,
-        mode="auto"
-    )
-    # 修正dataclass初始化
-    config.target_id = TARGET # 确保target正确
+    # 预加载 Cookies，只读取一次文件
+    shared_cookies = {}
+    if os.path.exists(cookies_path):
+        try:
+            with open(cookies_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                try:
+                    shared_cookies = json.loads(content)
+                except json.JSONDecodeError:
+                    shared_cookies = {k.strip(): v.strip() for k, v in [i.split('=', 1) for i in content.split(';') if '=' in i]}
+            logging.info("Cookies 预加载成功")
+        except Exception as e:
+            logging.error(f"预加载 Cookies 失败: {e}")
+    else:
+        logging.error(f"配置文件未找到: {cookies_path}")
+        return
 
-    print(f"即将对目标 {TARGET} 发送弹幕...")
-    print("请确保目录下有 cookies.json 文件，且包含 bili_jct 和 SESSDATA")
+    # 创建所有任务
+    tasks = []
     
+    # 共享Session
+    async with aiohttp.ClientSession() as session:
+        for target in targets:
+            config = SenderConfig(
+                target_id=target,
+                cookies_file=cookies_path,
+                interval_min=0.8,
+                interval_max=1.5,
+                mode="auto"
+            )
+            sender = BilibiliDanmakuSender(config, shared_cookies=shared_cookies)
+            # 添加到任务列表
+            tasks.append(sender.run(session))
+        
+        if not tasks:
+            return
+
+        print(f"即将对 {len(tasks)} 个目标 {targets} 启动任务...")
+        await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
     try:
-        sender = BilibiliDanmakuSender(config)
-        asyncio.run(sender.run())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n用户手动停止")
