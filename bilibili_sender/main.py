@@ -264,13 +264,17 @@ if __name__ == "__main__":
     # --- 用户配置区域 ---
     TARGET = input("请输入直播间ID或视频BV号: ").strip()
     
+    # 获取脚本所在目录，确保能找到同级目录下的cookies.json
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cookies_path = os.path.join(script_dir, "cookies.json")
+
     # 你可以这里写死配置，或者接受输入
     config = SenderConfig(
         target_id=TARGET,
-        cookies_file="cookies.json",  # 确保这个文件存在
+        cookies_file=cookies_path,  # 使用绝对路径
         interval_min=0.8,
         interval_max=1.5,
-        target_id="auto" # 这里的target_id参数被上面的参数覆盖，这里只是示意Config对象
+        mode="auto"
     )
     # 修正dataclass初始化
     config.target_id = TARGET # 确保target正确
